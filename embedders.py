@@ -93,41 +93,53 @@ class BertEmbedder(Embedder):
         orig_to_tok_index = []
         all_doc_tokens = []
         for (i, token) in enumerate(doc_tokens):
-            orig_to_tok_index.append(len(all_doc_tokens))
             sub_tokens = self.tokenizer.tokenize(token)
+            start_end = (len(all_doc_tokens), len(all_doc_tokens)+len(sub_tokens))
+            orig_to_tok_index.append(start_end)
             for sub_token in sub_tokens:
                 tok_to_orig_index.append(i)
                 all_doc_tokens.append(sub_token)
 
         return all_doc_tokens, tok_to_orig_index, orig_to_tok_index
+    
 
-    def select_embeddings(self, original_tokens, selection_f="first"):
-        """
-        Here it can be decided which embeddings are selected
-        to represent the original tokens. Several strategies can be applied.
-        E.g. the first subtoken, an average of subtokens, or a pool.
-        """
+    # def select_embeddings(self, original_tokens, spans, selection_f="mean"):
+    #     """
+    #     Here it can be decided which embeddings are selected
+    #     to represent the original tokens. Several strategies can be applied.
+    #     E.g. the first subtoken, an average of subtokens, or a pool.
+    #     """
 
-        def _first(embeddings, tok2orig, orig2tok, bert_tokens):
-            selected_embeddings = []
-            embedding_tokens = []
-            for _, token in enumerate(orig2tok):
-                selected_embeddings.append(embeddings[token])
-                embedding_tokens.append(bert_tokens[token]) 
+    #     def _first(span, embeddings, tok2orig, orig2tok, bert_tokens):
+    #         first, _ = orig2tok[span[0]]
+    #         embedding = embeddings[first]
+    #         token = bert_tokens[first]
 
-            return selected_embeddings, embedding_tokens
+    #         return embedding, token
         
-        def _pool(embeddings, tok2orig, orig2tok, bert_tokens):
-            pass
+    #     def _abs_max(span, sembeddings, tok2orig, orig2tok, bert_tokens):
+    #         pass
 
-        def _average(embeddings, tok2orig, orig2tok, bert_tokens):
-            pass
+    #     def _mean(span, embeddings, tok2orig, orig2tok, bert_tokens):
+    #         positions = orig2tok[span[0]:span[1]]
+    #         first, last = positions[0][0], positions[-1][1]
+    #         selected_embeddings = [embedding for embedding in embeddings[first:last]]
+    #         embedding = torch.stack(selected_embeddings).mean(dim=0)
+    #         token = '_'.join(bert_tokens[first:last])
 
-        f_map = {"first": _first, "pool": _pool, "average": _average}
-        bert_tokens, tok2orig, orig2tok = self.tokenize_with_mapping(original_tokens)
-        embeddings = self.embed(bert_tokens)[1:-1] # skip special tokens  
+    #         return embedding, token
 
-        return f_map[selection_f](embeddings, tok2orig, orig2tok, bert_tokens)
+    #     f_reduce = {"first": _first, "abs_max": _abs_max, "mean": _mean}
+    #     bert_tokens, tok2orig, orig2tok = self.tokenize_with_mapping(original_tokens)
+    #     embeddings = self.embed(bert_tokens)[1:-1] # skip special tokens  
+    #     span_embeddings, span_tokens = [], []
+    #     for span in spans:
+    #         span_embedding, span_token = f_reduce[selection_f](
+    #             span, embeddings, tok2orig, orig2tok, bert_tokens)
+    #         span_embeddings.append(span_embedding)
+    #         span_tokens.append(span_token)
+
+    #     return span_embeddings, span_tokens
 
     def __repr__(self):
         return "BertEmbedder()"

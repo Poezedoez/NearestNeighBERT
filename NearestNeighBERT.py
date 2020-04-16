@@ -9,8 +9,8 @@ from tqdm import tqdm
 import math
 import numpy as np
 import time
-import faiss
-from read import read_dataset, read_faiss
+# import faiss
+from data import read_dataset, read_faiss
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 VOTING_F = {'discrete':(lambda s, i: 1), 'rank_weighted':(lambda s, i: 1/(i+1)), 'similarity_weighted':(lambda s, i: s)}
@@ -27,11 +27,14 @@ class NearestNeighBERT:
         tokenizer (Embedder): a tokenizer to tokenize and embed text
     '''
 
-    def __init__(self, k=10, voting_f='similarity_weighted', index=None, index_table=[], tokenizer=None):
+    def __init__(self, k=10, voting_f='similarity_weighted', entity_index=None, 
+                 entity_table=[], relation_index=None, relation_table=[], tokenizer=None):
         self.k = k
         self.voting_f = voting_f
-        self.index = index
-        self.index_table = index_table
+        self.entity_index = entity_index
+        self.entity_table = entity_table
+        self.relation_index = relation_index
+        self.relation_table = relation_table
         self.tokenizer = tokenizer
 
 
@@ -44,32 +47,48 @@ class NearestNeighBERT:
         return self
 
 
-    def train(self, dataset_path, tokenizer_path='scibert-base-uncased', save_path="data/"):    
+    def train(self, dataset_path, tokenizer_path='scibert-base-uncased', 
+              save_path="data/", index_name="faiss_index", index_table_name="faiss_index_table.json",
+              max_span_length=None):   
         self.tokenizer = BertEmbedder(tokenizer_path)
-        self.index = faiss.IndexFlatL2(self.tokenizer.embedding_size)
-        for tokens, labels, embeddings, embedding_tokens in read_dataset(dataset_path, self.tokenizer):
-            self.index.add(torch.stack(embeddings).numpy())
-            table_entry = [{"label": tuple(labels[i]), "token": tokens[i], "bert_token": embedding_tokens[i]} 
-                            for i, _ in enumerate(tokens)]
-            self.index_table += table_entry
+        # self.index = faiss.IndexFlatL2(self.tokenizer.embedding_size)
+        for spans, relations in read_dataset(dataset_path, self.tokenizer, max_span_length):
+            # self.index.add(torch.stack(embeddings).numpy())
+            entity_entries = [span.to_entry_table for span in spans]
+            relation_entries = [relation.to_entry_table for relation in relations]
+
+            # check entities
+            for entry in entity_entries:
+                print(entry)
+            print()
+
+            # check relations
+            for entry in relation_entries:
+                print(entry)
+            print()
+
+            self.entity_table += entity_entries
+            self.relation_table += relation_entries
         
         # Save train results
         utils.create_dir(save_path)
-        faiss.write_index(self.index, save_path+"faiss_index")
-        with open(save_path+"faiss_index_table.json", 'w') as json_file:
+        # faiss.write_index(self.index, save_path+index_name)
+        with open(save_path+index_table_name, 'w') as json_file:
             json.dump(self.index_table, json_file)
         print("Indexed {} tokens with their labels".format(len(self.index_table)))
 
-    def ready_inference(self, index_path, tokenizer_path='scibert-base-uncased', device=DEVICE):
+    def ready_inference(self, index_path, tokenizer_path='scibert-base-uncased', device=DEVICE,
+                        index_name="faiss_index", index_table_name="faiss_index_table.json"):
         self.tokenizer = BertEmbedder(tokenizer_path)
-        self.index, self.index_table = read_faiss(index_path, device)
+        self.index, self.index_table = read_faiss(index_path, device, index_name, index_table_name)
 
-    def infer(self, document):
+    def infer(self, document, span_based=False):
         # Classify each vector based on k-NN voting function
         inference_document = []
         for sentence in document["sentences"]:
             tokens, _, token2char, = self.tokenizer.split(sentence)
-            selected_embeddings, _ = self.tokenizer.select_embeddings(tokens)
+            spans = create_spans(tokens)
+            for span in spans: span.calculate_embedding(tokens, tokenizer)
             D, I = self.index.search(torch.stack(selected_embeddings).numpy(), self.k)
             pred_labels = self.vote_labels(I, D)
             prediction = self.convert_prediction(tokens, pred_labels)
@@ -161,3 +180,8 @@ class NearestNeighBERT:
     def __str__(self):
         return "NearestNeighBERT"    
 
+if __name__ == "__main__":
+    TEST_DATA_PATH = "../spert/data/datasets/semeval2017_task10/semeval2017_task10_train.json"
+    TOKENIZER_PATH = "../spert/scibert_scivocab_uncased/"
+    nn = NearestNeighBERT()
+    nn.train(TEST_DATA_PATH, TOKENIZER_PATH, max_span_length=7)
