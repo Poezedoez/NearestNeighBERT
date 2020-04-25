@@ -1,0 +1,7 @@
+{
+    "f_voting": "unweighted",
+    "f_similarity": "L2",
+    "f_reduce": "mean",
+    "k": 3,
+    "neg_label": "O"
+}

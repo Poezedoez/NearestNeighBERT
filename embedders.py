@@ -85,15 +85,20 @@ class BertEmbedder(Embedder):
         
         return torch.squeeze(embeddings)
         
-    def tokenize_with_mapping(self, doc_tokens):
-        ''' Returns mapping between BERT tokens
-        and input tokens.
+    def tokenize_with_mapping(self, doc_tokens, f_tokenize="bert"):
+        ''' 
+        Returns mapping between input tokens and tokenized tokens
         '''
+        f  = {
+            "bert": (lambda t: self.tokenizer.tokenize(t)),
+            "split": (lambda t: self.split(t)[0])
+        }
+
         tok_to_orig_index = []
         orig_to_tok_index = []
         all_doc_tokens = []
         for (i, token) in enumerate(doc_tokens):
-            sub_tokens = self.tokenizer.tokenize(token)
+            sub_tokens = f.get(f_tokenize, self.tokenizer.tokenize)(token)
             start_end = (len(all_doc_tokens), len(all_doc_tokens)+len(sub_tokens))
             orig_to_tok_index.append(start_end)
             for sub_token in sub_tokens:

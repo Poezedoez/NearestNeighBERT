@@ -1,24 +1,8 @@
-from itertools import groupby
 from collections import defaultdict
 import string
-import json
 import os
 from pathlib import Path
 import math
-from tqdm import tqdm
-        
-def get_subword_mapping(tokens):
-    ''' Unknown words are mapped by BERT tokenizer to multiple subword tokens.
-    This functions identifies which subwords are part of the original unknown words
-    by mapping their string positions in the text to the sentence indices of the subwords'''
-    mapping = defaultdict(list)
-    sentence_index = 0
-    for i, token in enumerate(tokens):
-        mapping[sentence_index].append(i)
-        if not token.startswith('##'):
-            sentence_index += 1
-    
-    return mapping
     
 def is_whitespace(c):
     if c == " " or c == "\t" or c == "\r" or c == "\n" or ord(c) == 0x202F or c=="\xa0":

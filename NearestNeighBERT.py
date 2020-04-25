@@ -1,3 +1,5 @@
+import sys
+sys.path.append('../distantly-supervised-dataset/')
 import torch
 import torch.nn.functional as F
 import json
@@ -11,51 +13,41 @@ import numpy as np
 import time
 import faiss
 import data
+import outputs
+import copy
 from evaluate import evaluate as eval
 from typing import List, Type
+
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 VOTING_F = {'discrete':(lambda s, i: 1), 'rank_weighted':(lambda s, i: 1/(i+1)), 'similarity_weighted':(lambda s, i: s)}
 
 class NearestNeighBERT:
     '''
-    A K-nearest neighbor classifier
+    A K-nearest neighbor classifier.
     Optional parameters can be passed.
     Args:
         k (int): nearest neighbors to cast a vote
         f_voting (str): name of voting function accountable for the weight of a vote
         f_similarity (str): name of function to compare vectors with e.g L2 or IP
-        entity_index (faiss index): a faiss index for entities allowing for skipping of training
-        entity_table (array): a table which maps faiss entity indices to properties such as label
-        relation_index (faiss index): a faiss index for relations allowing for skipping of training
-        relation_table (array): a table which maps faiss relation indices to properties such as label
+        index (faiss index): a faiss index for entities allowing for skipping of training
+        table (array): a table which maps faiss token indices to properties such as label
         tokenizer (Embedder): a tokenizer to tokenize and embed text
-        f_entity_embedding (str): function name to obtain a single entity embedding from multiple
-        f_relation_embedding (str): function name to obtain a single relation embedding
-        neg_ent (int): amount of negative entity examples to index in addition to positive examples
-        neg_rel (int): amount of negative relation examples to index in addition to positive examples
+        f_reduce (str): function name to obtain combine subword tokens
         neg_label (str): label for a Datapoint that has no type
-        max_span_length (int): create spans up to this length
     '''
 
-    def __init__(self, k=10, f_voting="similarity_weighted", f_similarity="L2", entity_index=None, 
-                 entity_table=[], relation_index=None, relation_table=[], tokenizer=None,
-                 f_entity_embedding="abs_max", f_relation_embedding="substract", neg_ent=30, neg_rel=5,
-                 neg_label='O', max_span_length=3, glue_spans=False):
+    def __init__(self, k=10, f_voting="similarity_weighted", f_similarity="L2", index=None, 
+                 table=[], tokenizer=None, f_reduce="abs_max", neg_label="O"):
         self.k = k
         self.f_voting = f_voting
         self.f_similarity = f_similarity
-        self.entity_index = entity_index
-        self.entity_table = entity_table
-        self.relation_index = relation_index
-        self.relation_table = relation_table
+        self.index = index
+        self.table = table
         self.tokenizer = tokenizer
-        self.f_entity_embedding = f_entity_embedding
-        self.f_relation_embedding = f_relation_embedding
-        self.neg_ent = neg_ent
-        self.neg_rel = neg_rel
+        self.f_reduce = f_reduce
         self.neg_label = neg_label
-        self.max_span_length = max_span_length
+        self.config = None
 
 
     def configure(self, path="configs/config_za.json"):
@@ -63,72 +55,51 @@ class NearestNeighBERT:
             config = json.load(json_config)
             self.k = config.get("k", self.k)
             self.f_voting = config.get("voting_f", self.f_voting)
-            self.f_entity_embedding = config.get("f_entity_embedding", self.f_entity_embedding)
-            self.f_relation_embedding = config.get("f_relation_embedding", self.f_relation_embedding)
-            self.neg_ent = config.get("neg_ent", self.neg_ent)
-            self.neg_rel = config.get("neg_rel", self.neg_rel)
+            self.f_reduce = config.get("f_reduce", self.f_reduce)
             self.neg_label = config.get("neg_label", self.neg_label)
-            self.max_span_length = config.get("max_span_length", self.max_span_length)
-        
+        self.config = config
+
         return self
+
 
     def train(self, dataset_path, tokenizer_path='scibert-base-uncased', save_path="data/"):   
         self.tokenizer = BertEmbedder(tokenizer_path)
-        self.entity_index = data.init_faiss(self.f_entity_embedding, self.f_similarity, self.tokenizer)
-        self.relation_index = data.init_faiss(self.f_relation_embedding, self.f_similarity, self.tokenizer)
+        self.index = data.init_faiss(self.f_reduce, self.f_similarity, self.tokenizer)
 
-        data_generator = data.prepare_dataset(dataset_path, self.tokenizer, self.max_span_length, self.neg_rel, 
-                                              self.neg_ent, self.neg_label, self.f_entity_embedding, 
-                                              self.f_relation_embedding)
+        data_generator = data.prepare_dataset(dataset_path, self.tokenizer, self.neg_label, self.f_reduce)
         print("Training...")
-        for entities, relations in data_generator:
-
-            # Index entities
-            entity_embeddings = [e.embedding for e in entities]
-            entity_entries = [e.to_table_entry() for e in entities]
-            self.entity_table += entity_entries
-            self.entity_index.add(torch.stack(entity_embeddings).numpy())
-
-            # Index relations
-            relation_embeddings = [r.embedding for r in relations]
-            relation_entries = [r.to_table_entry() for r in relations]
-            self.relation_table += relation_entries
-            self.relation_index.add(torch.stack(relation_embeddings).numpy())
+        for tokens in data_generator:
+            if tokens:
+                token_embeddings = [t.embedding for t in tokens]
+                token_entries = [t.to_table_entry() for t in tokens]
+                self.table += token_entries
+                self.index.add(torch.stack(token_embeddings).numpy())
         
-        data.save_faiss(self.entity_index, self.entity_table, "entities", save_path)
-        data.save_faiss(self.relation_index, self.relation_table, "relations", save_path)
+        data.save_faiss(self.index, self.table, "tokens", save_path)
+        train_config_path = os.path.join(save_path, "train_config.json")
+        self.save_config(train_config_path)
+
 
     def ready_inference(self, index_path, tokenizer_path='scibert-base-uncased', device=DEVICE):
         self.tokenizer = BertEmbedder(tokenizer_path)
-        self.entity_index, self.entity_table = data.load_faiss(index_path, device, "entities")
-        self.relation_index, self.relation_table = data.load_faiss(index_path, device, "relations")
+        self.index, self.table = data.load_faiss(index_path, device, "tokens")
+
 
     def infer(self, document):
         inference_document = []
         for sentence in tqdm(document["sentences"]):
-            original_tokens, _, token2char, = self.tokenizer.split(sentence)
-            bert_tokens, tok2orig, orig2tok = self.tokenizer.tokenize_with_mapping(original_tokens)
+            string_tokens, _, token2char, = self.tokenizer.split(sentence)
+            bert_tokens, tok2orig, orig2tok = self.tokenizer.tokenize_with_mapping(string_tokens)
             embeddings = self.tokenizer.embed(bert_tokens)[1:-1] # skip special tokens
 
-            # Infer entities
-            entities = data.create_entities(original_tokens, self.max_span_length)
-            if entities:
-                entity_embeddings = [e.calculate_embedding(embeddings, bert_tokens, orig2tok, self.f_entity_embedding) for e in entities]
-                q_entities = torch.stack(entity_embeddings).numpy()
-                D, I = self.entity_index.search(q_entities, self.k)
-                self.vote_labels(entities, self.entity_table, D, I)
-            pos_entities = data.filter_negatives(entities, self.neg_label)
+            tokens = data.create_tokens(string_tokens)
+            if tokens:
+                token_embeddings = [t.calculate_embedding(embeddings, bert_tokens, orig2tok, self.f_reduce) for t in tokens]
+                q = torch.stack(token_embeddings).numpy()
+                D, I = self.index.search(q, self.k)
+                self.vote_labels(tokens, self.table, D, I)
 
-            # Infer relations
-            relations = data.create_relations(pos_entities, neg_label=self.neg_label)
-            if relations:
-                relation_embeddings = [r.calculate_embedding(self.f_relation_embedding) for r in relations]
-                q_relations = torch.stack(relation_embeddings).numpy()
-                D, I = self.relation_index.search(q_relations, self.k)
-                self.vote_labels(relations, self.relation_table, D, I)
-            pos_relations = data.filter_negatives(relations, self.neg_label)
-
-            prediction = self.convert_prediction(original_tokens, pos_entities, pos_relations)
+            prediction = self.convert_prediction(string_tokens, tokens)
             inference_document.append(prediction)
 
         return inference_document
@@ -141,165 +112,136 @@ class NearestNeighBERT:
         # TODO: implement
         pass
 
-    def evaluate(self, evaluation_path, inference_path="data/predictions.json"):
+
+    def evaluate(self, evaluation_path, results_path="data/results/"):
         """
         Evaluate a dataset by doing inference on the data without labels. 
         See data.py for example format of the dataset.
         """
         dataset = json.load(open(evaluation_path))
         sentences = [' '.join(entry["tokens"]) for entry in dataset]
+        utils.create_dir(results_path)
+
         print("Evaluating...")
-        inference_document = self.infer({"sentences": sentences})
-        with open(inference_path, 'w', encoding='utf-8') as f:
-            json.dump(inference_document, f)
-        eval(evaluation_path, inference_path)
+        predictions = self.infer({"sentences": sentences})
+        predictions_path = os.path.join(results_path, "predictions.json")
+        with open(predictions_path, 'w', encoding='utf-8') as f:
+            json.dump(predictions, f)
+        ner_eval, rel_eval = eval(evaluation_path, predictions_path, self.tokenizer)
+
+        predicted_examples_path = os.path.join(results_path, "predicted_examples.txt")
+        outputs.compare_datasets(evaluation_path, predictions_path, predicted_examples_path)
+
+        final_config_path = os.path.join(results_path, "final_config.json")
+        self.save_config(final_config_path)
+
+        return ner_eval, rel_eval
 
 
-    def vote_labels(self, datapoints: List[data.Datapoint], table, distances, indices):
+    def vote_labels(self, datapoints: List[data.Datapoint], table, distances, indices, verbose=False):
         """
         Given a list of datapoints and their distances and indices,
         assign a label to the datapoints 
         """
-        # print(distances)
         a = distances-np.min(distances)
         b = np.max(distances)-np.min(distances)
-        normalized_distances = 1-np.divide(a, b, out=np.zeros_like(a), where=b!=0) # 1-similarity for distance
+        normalized_similarities = 1-np.divide(a, b, out=np.zeros_like(a), where=b!=0) # 1-distance for similarity
         pred_labels = []
         for i, row in enumerate(indices):
             weight_counter = Counter()
             votes = []
             neighbor_tokens = []
             candidate = datapoints[i] 
+            nearest_neighbors = []
             for j, neighbor_index in enumerate(row):
                 neighbor = table[neighbor_index]
+                nearest_neighbors.append(neighbor)
                 vote = neighbor["label"]
-                # print(neighbor["string"])
                 votes.append(vote)
-                weight = VOTING_F[self.f_voting](normalized_distances[i][j], j)
+                weight = VOTING_F[self.f_voting](normalized_similarities[i][j], j)
                 weight_counter[vote] += weight
             
-
             pred_label = weight_counter.most_common(1)[0][0]
             candidate.label = pred_label
-            # print("---->", candidate)
-            # print()
 
-    # def which_spans_ending(self, prev, current):
-    #     '''Returns which labels of the prev vector were the last in their span'''
-    #     spans_ending = {label:True for label in prev}
-    #     for prev_label in prev:
-    #         if prev_label in current:
-    #             spans_ending[prev_label] = False
-                
-    #     return spans_ending
+            if verbose:
+                print("Predicted: ", candidate)
+                for i, neighbor in enumerate(nearest_neighbors):
+                    print("\t (nn {}) {}".format(i, neighbor["string"]))
+                print()
 
 
-    def convert_prediction(self, tokens, entities, relations):
-        converted_entities = [{"start":e.start, "end":e.end, "type":e.label} for e in entities]
-        converted_relations = [{"head":r.head_position, "tail":r.tail_position, "type":r.label} for r in relations]
+    def _expand_entities(self, string_tokens, tokens):
+        def _is_entity(label): 
+            return label!=self.neg_label
+        def _span_continues(prev, current):
+            return  prev_label==current_label and _is_entity(prev_label)
+        def _span_ends(prev, current):
+            return prev_label!=current_label and _is_entity(prev_label)
 
+        entities = []
+        labels = [t.label for t in tokens] # assume same position as tokens
+        prev_label = 'O'
+        start = 0
+        for i, current_label in enumerate(labels):
+            if _span_continues(prev_label, current_label):
+                prev_label = current_label
+                continue
+
+            if _span_ends(prev_label, current_label):
+                entities.append({"start": start, "end": i, "type": prev_label})       
+            
+            start = i
+            prev_label = current_label
+
+        # last token of the sentence is entity
+        if _is_entity(current_label):
+            entities.append({"start": start, "end": i+1, "type": prev_label})
+
+        return entities
+
+    def convert_prediction(self, string_tokens, tokens):
+        entities = self._expand_entities(string_tokens, tokens)
         prediction = {
-                        "tokens": tokens, 
-                        "entities": converted_entities, 
-                        "relations": converted_relations, 
-                        "orig_id": hash(' '.join(tokens))
+                        "tokens": string_tokens, 
+                        "entities": entities, 
+                        "relations": [], 
+                        "orig_id": hash(' '.join(string_tokens))
                     }
 
-        return prediction     
+        return prediction  
 
-    # def convert_prediction(self, tokens, entities, relations):
-    #     def _glue_spans():
-    #         converted_entities, converted_relations = [], []
-
-    #         # Map entity span labels to token labels
-    #         mapped_labels = [set() for _ in tokens]
-    #         for entity in entities:     
-    #             if entity.label == self.neg_label:
-    #                 continue
-    #             for label_set in mapped_labels[entity.start:entity.end]:
-    #                 label_set.add(entity.label)
-    #         # label_set.add(self.neg_label)
-                    
-    #         # Glue individual labels 
-    #         label_start = {}
-    #         prev = set()   
-    #         entity_labels = set([entity.label for entity in entities])
-    #         entity_labels.remove(self.neg_label)
-    #         for i, current in enumerate(mapped_labels):   
-    #             spans_ending = self.which_spans_ending(prev, current)
-    #             # print("PREV / CURRENT / ENDING", i, prev, current, spans_ending)
-    #             for label in entity_labels:
-    #                 # span starts
-    #                 if label in current and label not in prev:
-    #                     label_start[label] = i
-    #                 # span ends
-    #                 elif spans_ending.get(label):
-    #                     e = {"start": label_start.get(label, 0), "end": i, "type":label}
-    #                     converted_entities.append(e)
-    #                 # last in sequence
-    #                 if i==(len(mapped_labels)-1) and label in current:
-    #                     e = {"start": label_start.get(label, 0), "end": i+1, "type":label}
-    #                     converted_entities.append(e)
-    #             prev = current
-            
-    #         print("relations to map:", len([r for r in relations if r.label!=self.neg_label]))
-    #         # Remap relations to new entity indices
-    #         entity_map = {i:None for i, _ in enumerate(tokens)}
-    #         for i, e in enumerate(converted_entities):
-    #             for j in range(e["start"], e["end"]):
-    #                 entity_map[j] = i
-    #         converted_relations = []
-    #         duplicates = set()
-    #         for r in relations:
-    #             if r.label == self.neg_label:
-    #                 continue
-    #             mapped_relation = {"head":entity_map[r.head.start], "tail":entity_map[r.tail.start], "type":r.label}
-    #             tuple_= (entity_map[r.head.start],entity_map[r.tail.start],r.label)
-    #             if tuple_ not in duplicates:
-    #                 converted_relations.append(mapped_relation)
-    #                 duplicates.add(tuple_)
-
-    #         print("mapped relations", len(converted_relations))
-    #         # for token, label in zip(tokens, mapped_labels):
-    #         #     if label:
-    #         #         print(token, label)            
-    #         for entity in converted_entities:
-    #             print(entity, tokens[entity["start"]:entity["end"]])
-    #         print(converted_entities)
-    #         print(converted_relations)
-    #         return converted_entities, converted_relations
-
-    #     if self.glue_spans:
-    #         converted_entities, converted_relations = _glue_spans()
-    #     else:
-    #         converted_entities = [{"start":e.start, "end":e.end, "type":e.label} for e in entities if(
-    #                     e.label != self.neg_label)]
-    #         converted_relations = [{"head":r.head_position, "tail":r.tail_position, "type":r.label} for r in relations if(
-    #                     r.label != self.neg_label)]
-
-    #     prediction = {
-    #                     "tokens": tokens, 
-    #                     "entities": converted_entities, 
-    #                     "relations": converted_relations, 
-    #                     "orig_id": hash(' '.join(tokens))
-    #                  }
-
-    #     return prediction
+    def save_config(self, save_path):
+        if self.config:
+            with open(save_path, 'w') as f:
+                json.dump(self.config, f)
     
     def __repr__(self):
-        return "NearestNeighBERT()"
+        return "Span_kNN()"
 
 
     def __str__(self):
-        return "NearestNeighBERT"    
+        return "Span_kNN"    
 
 if __name__ == "__main__":
-    TRAIN_PATH = "../spert/data/datasets/semeval2017_task10/semeval2017_task10_train.json"
-    EVAL_PATH = "../spert/data/datasets/semeval2017_task10/semeval2017_task10_dev.json"
-    TOKENIZER_PATH = "scibert_scivocab_uncased/"
-    CONFIG_PATH = "configs/semeval.json"
-    SAVE_PATH = "data/"
-    nn = NearestNeighBERT().configure(CONFIG_PATH)
-    # nn.train(TRAIN_PATH, TOKENIZER_PATH, SAVE_PATH)
-    nn.ready_inference(SAVE_PATH, TOKENIZER_PATH)
-    nn.evaluate(EVAL_PATH)
+    # TRAIN_PATH = "../spert/data/datasets/semeval2017_task10/semeval2017_task10_train.json"
+    # SAVE_PATH_TRAIN = "data/save/semeval2017/train/"
+    # EVAL_PATH = "../spert/data/datasets/semeval2017_task10/semeval2017_task10_dev.json"
+    # SAVE_PATH_EVAL = "data/save/semeval2017/eval/"
+    # CONFIG_PATH = "configs/semeval.json"
+    # TOKENIZER_PATH = "scibert_scivocab_uncased/"
+
+    TRAIN_PATH = "data/datasets/conll03/conll03_train.json"
+    SAVE_PATH_TRAIN = "data/save/conll03/train/"
+    EVAL_PATH = "data/datasets/conll03/conll03_dev.json"
+    SAVE_PATH_EVAL = "data/save/conll03/eval/"
+    CONFIG_PATH = "configs/conll03.json"
+    TOKENIZER_PATH = "bert-base-uncased"
+
+    
+    knn = NearestNeighBERT().configure(CONFIG_PATH)
+    # knn.train(TRAIN_PATH, TOKENIZER_PATH, SAVE_PATH_TRAIN)
+    knn.ready_inference(SAVE_PATH_TRAIN, TOKENIZER_PATH)
+    knn.evaluate(EVAL_PATH, SAVE_PATH_EVAL)
+
+    

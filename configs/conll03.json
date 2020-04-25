@@ -1,0 +1,7 @@
+{
+    "f_voting": "similarity_weighted",
+    "f_similarity": "L2",
+    "f_reduce": "mean",
+    "k": 5,
+    "neg_label": "O"
+}
