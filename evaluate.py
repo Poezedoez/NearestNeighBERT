@@ -4,6 +4,7 @@ import json
 import argparse
 from typing import List, Tuple, Dict
 from data import adjust_annotation
+import sys
 
 # From spert.evaluator class
 # https://github.com/markus-eberts/spert/blob/master/spert/evaluator.py
@@ -140,6 +141,32 @@ def evaluate(gt_path, pred_path, tokenizer):
     print("")
 
     return ner_span_eval, ner_token_eval
+
+
+def compare_datasets(gt_path, pred_path, output_path=None):
+    with open(gt_path, 'r', encoding='utf-8') as f:
+        gt_dataset = json.load(f)
+
+    with open(pred_path, 'r', encoding='utf-8') as f:
+        pred_dataset = json.load(f)
+
+    assert len(gt_dataset)==len(pred_dataset)
+
+    file_object = open(output_path, 'w', encoding='utf-8') if output_path else sys.stdout
+    for gt_sentence, pred_sentence in zip(gt_dataset, pred_dataset):
+        gt_tokens = gt_sentence["tokens"]
+        print("|{}| {} \n".format(gt_sentence["orig_id"], " ".join(gt_tokens)), file=file_object)
+        for entity in gt_sentence["entities"]:
+            entity_tokens = gt_tokens[entity["start"]:entity["end"]]
+            line = "[gold] \t {} \t {}".format(" ".join(entity_tokens), entity["type"])
+            print(line, file=file_object)
+        pred_tokens = pred_sentence["tokens"]
+        for entity in pred_sentence["entities"]:
+            entity_tokens = pred_tokens[entity["start"]:entity["end"]]
+            line = "[pred] \t {} \t {}".format(" ".join(entity_tokens), entity["type"])
+            print(line, file=file_object)
+        print('-'*50, file=file_object)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Evaluate spert json formatted dataset')

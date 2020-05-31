@@ -1,5 +1,5 @@
 import sys
-sys.path.append('../distantly-supervised-dataset/')
+from evaluate import compare_datasets
 import torch
 import torch.nn.functional as F
 import json
@@ -13,7 +13,6 @@ import numpy as np
 import time
 import faiss
 import data
-import outputs
 import copy
 from evaluate import evaluate as eval
 from typing import List, Type
@@ -38,7 +37,7 @@ class NearestNeighBERT:
     '''
 
     def __init__(self, k=10, f_voting="similarity_weighted", f_similarity="L2", index=None, 
-                 table=[], tokenizer=None, f_reduce="abs_max", neg_label="O"):
+                 table=[], tokenizer=None, f_reduce="mean", neg_label="O"):
         self.k = k
         self.f_voting = f_voting
         self.f_similarity = f_similarity
@@ -62,22 +61,35 @@ class NearestNeighBERT:
         return self
 
 
-    def train(self, dataset_path, tokenizer_path='scibert-base-uncased', save_path="data/"):   
-        self.tokenizer = BertEmbedder(tokenizer_path)
+    def ready_training(self):
         self.index = data.init_faiss(self.f_reduce, self.f_similarity, self.tokenizer)
 
+
+    def train(self, dataset_path, tokenizer_path='scibert-base-uncased', save_path="data/", save=True):   
+        self.ready_training()
+        self.tokenizer = BertEmbedder(tokenizer_path)
         data_generator = data.prepare_dataset(dataset_path, self.tokenizer, self.neg_label, self.f_reduce)
         print("Training...")
         for tokens in data_generator:
             if tokens:
                 token_embeddings = [t.embedding for t in tokens]
+                token_embeddings = torch.stack(token_embeddings).numpy()
                 token_entries = [t.to_table_entry() for t in tokens]
-                self.table += token_entries
-                self.index.add(torch.stack(token_embeddings).numpy())
-        
-        data.save_faiss(self.index, self.table, "tokens", save_path)
-        train_config_path = os.path.join(save_path, "train_config.json")
-        self.save_config(train_config_path)
+                self.index(token_embeddings, token_entries)
+
+        if save:
+            data.save_faiss(self.index, self.table, "tokens", save_path)
+            train_config_path = os.path.join(save_path, "train_config.json")
+            self.save_config(train_config_path)
+    
+
+    def train_(self, embeddings, entries):
+        """
+        This function can be used to train incremently, assumes already processed embeddings
+        and corresponding entries with info about them such as label.
+        """  
+        self.table += entries
+        self.index.add(np.array(embeddings))
 
 
     def ready_inference(self, index_path, tokenizer_path='scibert-base-uncased', device=DEVICE):
@@ -85,7 +97,7 @@ class NearestNeighBERT:
         self.index, self.table = data.load_faiss(index_path, device, "tokens")
 
 
-    def infer(self, document):
+    def infer(self, document, verbose=False):
         inference_document = []
         for sentence in tqdm(document["sentences"]):
             string_tokens, _, token2char, = self.tokenizer.split(sentence)
@@ -97,23 +109,31 @@ class NearestNeighBERT:
                 token_embeddings = [t.calculate_embedding(embeddings, bert_tokens, orig2tok, self.f_reduce) for t in tokens]
                 q = torch.stack(token_embeddings).numpy()
                 D, I = self.index.search(q, self.k)
-                self.vote_labels(tokens, self.table, D, I)
+                a = D-np.min(D)
+                b = np.max(D)-np.min(D)
+                normalized_similarities = 1-np.divide(a, b, out=np.zeros_like(a), where=b!=0) # 1-distance for similarity
+                labels, neighbors = self.vote(normalized_similarities, I)
+                self.assign_labels(tokens, labels, neighbors, verbose)
 
             prediction = self.convert_prediction(string_tokens, tokens)
             inference_document.append(prediction)
 
         return inference_document
 
-    def infer_(self, document):
+
+    def infer_(self, embeddings):
         """
-        This function alternative assumes document objects also contain embeddings,
-        which would significantly speed up the inference process
+        This function alternative assumes already calculated embeddings
+        and returns voted labels based on training index labels
         """
-        # TODO: implement
-        pass
+        q = np.array(embeddings)
+        D, I = self.index.search(q, self.k)
+        labels, neighbors = self.vote(D, I)
+
+        return labels, neighbors
 
 
-    def evaluate(self, evaluation_path, results_path="data/results/"):
+    def evaluate(self, evaluation_path, results_path="data/results/", verbose=True):
         """
         Evaluate a dataset by doing inference on the data without labels. 
         See data.py for example format of the dataset.
@@ -123,14 +143,14 @@ class NearestNeighBERT:
         utils.create_dir(results_path)
 
         print("Evaluating...")
-        predictions = self.infer({"sentences": sentences})
+        predictions = self.infer({"sentences": sentences}, verbose=verbose)
         predictions_path = os.path.join(results_path, "predictions.json")
         with open(predictions_path, 'w', encoding='utf-8') as f:
             json.dump(predictions, f)
         ner_eval, rel_eval = eval(evaluation_path, predictions_path, self.tokenizer)
 
         predicted_examples_path = os.path.join(results_path, "predicted_examples.txt")
-        outputs.compare_datasets(evaluation_path, predictions_path, predicted_examples_path)
+        compare_datasets(evaluation_path, predictions_path, predicted_examples_path)
 
         final_config_path = os.path.join(results_path, "final_config.json")
         self.save_config(final_config_path)
@@ -138,35 +158,34 @@ class NearestNeighBERT:
         return ner_eval, rel_eval
 
 
-    def vote_labels(self, datapoints: List[data.Datapoint], table, distances, indices, verbose=False):
+    def vote(self, similarities, indices):
         """
-        Given a list of datapoints and their distances and indices,
-        assign a label to the datapoints 
+        Given an array of similairties and neighbor indices,
+        vote labels for each entry
         """
-        a = distances-np.min(distances)
-        b = np.max(distances)-np.min(distances)
-        normalized_similarities = 1-np.divide(a, b, out=np.zeros_like(a), where=b!=0) # 1-distance for similarity
         pred_labels = []
+        all_neighbors = []
         for i, row in enumerate(indices):
             weight_counter = Counter()
-            votes = []
-            neighbor_tokens = []
-            candidate = datapoints[i] 
             nearest_neighbors = []
             for j, neighbor_index in enumerate(row):
-                neighbor = table[neighbor_index]
+                neighbor = self.table[neighbor_index]
                 nearest_neighbors.append(neighbor)
                 vote = neighbor["label"]
-                votes.append(vote)
-                weight = VOTING_F[self.f_voting](normalized_similarities[i][j], j)
+                weight = VOTING_F[self.f_voting](similarities[i][j], j)
                 weight_counter[vote] += weight
-            
             pred_label = weight_counter.most_common(1)[0][0]
-            candidate.label = pred_label
+            pred_labels.append(pred_label)
 
+        return pred_labels, all_neighbors
+
+
+    def assign_labels(self, tokens, labels, neighbors, verbose=False):
+        for t, l, n in zip(tokens, labels, neighbors):
+            t.label = l
             if verbose:
-                print("Predicted: ", candidate)
-                for i, neighbor in enumerate(nearest_neighbors):
+                print("Predicted: ", t)
+                for i, neighbor in enumerate(n):
                     print("\t (nn {}) {}".format(i, neighbor["string"]))
                 print()
 
@@ -199,6 +218,7 @@ class NearestNeighBERT:
             entities.append({"start": start, "end": i+1, "type": prev_label})
 
         return entities
+
 
     def convert_prediction(self, string_tokens, tokens):
         entities = self._expand_entities(string_tokens, tokens)
