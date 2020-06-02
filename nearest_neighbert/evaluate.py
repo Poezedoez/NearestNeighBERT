@@ -3,7 +3,7 @@ import numpy as np
 import json
 import argparse
 from typing import List, Tuple, Dict
-from data import adjust_annotation
+from nearest_neighbert.data import adjust_annotation
 import sys
 
 # From spert.evaluator class

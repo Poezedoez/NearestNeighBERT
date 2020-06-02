@@ -13,11 +13,13 @@ import copy
 from typing import List, Type
 
 # Local
-import data
-from embedders import BertEmbedder
-from evaluate import compare_datasets
-from evaluate import evaluate as eval
-import utils
+# sys.path.append('.')
+# NN = __import__(__name__.split('.')[0])
+import nearest_neighbert.data
+from nearest_neighbert.embedders import BertEmbedder
+from nearest_neighbert.evaluate import compare_datasets
+from nearest_neighbert.evaluate import evaluate as eval
+import nearest_neighbert.utils
 
 
 

@@ -1,6 +1,6 @@
 import json
 import faiss
-import utils
+import nearest_neighbert.utils
 import random
 import torch
 import os
@@ -134,7 +134,7 @@ def prepare_dataset(path, tokenizer, neg_label='O', f_reduce="abs_max"):
         neg_tokens = _create_negative_tokens(string_tokens, pos_tokens, neg_label)
         tokens = pos_tokens + neg_tokens
         for token in tokens: token.calculate_embedding(embeddings, bert_tokens, orig2tok, f_reduce)
-        
+
         yield tokens
 
 

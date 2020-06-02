@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-import utils
+import nearest_neighbert.utils
 import os, string
 import torch
 from transformers import BertModel, BertTokenizer
