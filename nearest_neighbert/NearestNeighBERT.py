@@ -1,21 +1,25 @@
 import sys
-from evaluate import compare_datasets
 import torch
 import torch.nn.functional as F
 import json
 import os
 from collections import defaultdict, Counter
-from embedders import BertEmbedder
-import utils
 from tqdm import tqdm
 import math
 import numpy as np
 import time
 import faiss
-import data
 import copy
-from evaluate import evaluate as eval
 from typing import List, Type
+
+# Local
+import data
+from embedders import BertEmbedder
+from evaluate import compare_datasets
+from evaluate import evaluate as eval
+import utils
+
+
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -54,6 +58,7 @@ class NearestNeighBERT:
             config = json.load(json_config)
             self.k = config.get("k", self.k)
             self.f_voting = config.get("voting_f", self.f_voting)
+            self.f_similarity = config.get("similarity_f", self.f_similarity)
             self.f_reduce = config.get("f_reduce", self.f_reduce)
             self.neg_label = config.get("neg_label", self.neg_label)
         self.config = config
@@ -61,13 +66,13 @@ class NearestNeighBERT:
         return self
 
 
-    def ready_training(self):
+    def ready_training(self, tokenizer_path):
+        self.tokenizer = BertEmbedder(tokenizer_path)
         self.index = data.init_faiss(self.f_reduce, self.f_similarity, self.tokenizer)
 
 
-    def train(self, dataset_path, tokenizer_path='scibert-base-uncased', save_path="data/", save=True):   
-        self.ready_training()
-        self.tokenizer = BertEmbedder(tokenizer_path)
+    def train(self, dataset_path, tokenizer_path='scibert-base-cased', save_path="data/", save=True):   
+        self.ready_training(tokenizer_path)
         data_generator = data.prepare_dataset(dataset_path, self.tokenizer, self.neg_label, self.f_reduce)
         print("Training...")
         for tokens in data_generator:
@@ -75,7 +80,7 @@ class NearestNeighBERT:
                 token_embeddings = [t.embedding for t in tokens]
                 token_embeddings = torch.stack(token_embeddings).numpy()
                 token_entries = [t.to_table_entry() for t in tokens]
-                self.index(token_embeddings, token_entries)
+                self.train_(token_embeddings, token_entries)
 
         if save:
             data.save_faiss(self.index, self.table, "tokens", save_path)
@@ -111,8 +116,10 @@ class NearestNeighBERT:
                 D, I = self.index.search(q, self.k)
                 a = D-np.min(D)
                 b = np.max(D)-np.min(D)
-                normalized_similarities = 1-np.divide(a, b, out=np.zeros_like(a), where=b!=0) # 1-distance for similarity
-                labels, neighbors = self.vote(normalized_similarities, I)
+                D_norm = np.divide(a, b, out=np.zeros_like(a), where=b!=0)
+                if self.f_similarity=='L2':
+                    D_norm = 1-D_norm # 1-distance for similarity
+                labels, neighbors = self.vote(D_norm, I)
                 self.assign_labels(tokens, labels, neighbors, verbose)
 
             prediction = self.convert_prediction(string_tokens, tokens)
@@ -121,14 +128,14 @@ class NearestNeighBERT:
         return inference_document
 
 
-    def infer_(self, embeddings):
+    def infer_(self, embeddings, label_type=str):
         """
         This function alternative assumes already calculated embeddings
         and returns voted labels based on training index labels
         """
         q = np.array(embeddings)
         D, I = self.index.search(q, self.k)
-        labels, neighbors = self.vote(D, I)
+        labels, neighbors = self.vote(D, I, label_type)
 
         return labels, neighbors
 
@@ -158,7 +165,7 @@ class NearestNeighBERT:
         return ner_eval, rel_eval
 
 
-    def vote(self, similarities, indices):
+    def vote(self, similarities, indices, label_type=str):
         """
         Given an array of similairties and neighbor indices,
         vote labels for each entry
@@ -175,7 +182,8 @@ class NearestNeighBERT:
                 weight = VOTING_F[self.f_voting](similarities[i][j], j)
                 weight_counter[vote] += weight
             pred_label = weight_counter.most_common(1)[0][0]
-            pred_labels.append(pred_label)
+            pred_labels.append(label_type(pred_label))
+            all_neighbors.append(nearest_neighbors)
 
         return pred_labels, all_neighbors
 
@@ -228,7 +236,7 @@ class NearestNeighBERT:
                         "relations": [], 
                         "orig_id": hash(' '.join(string_tokens))
                     }
-
+        
         return prediction  
 
     def save_config(self, save_path):
@@ -237,11 +245,11 @@ class NearestNeighBERT:
                 json.dump(self.config, f)
     
     def __repr__(self):
-        return "Span_kNN()"
+        return "NearestNeighBERT()"
 
 
     def __str__(self):
-        return "Span_kNN"    
+        return "NearestNeighBERT"    
 
 if __name__ == "__main__":
     # TRAIN_PATH = "../spert/data/datasets/semeval2017_task10/semeval2017_task10_train.json"
@@ -262,6 +270,6 @@ if __name__ == "__main__":
     knn = NearestNeighBERT().configure(CONFIG_PATH)
     # knn.train(TRAIN_PATH, TOKENIZER_PATH, SAVE_PATH_TRAIN)
     knn.ready_inference(SAVE_PATH_TRAIN, TOKENIZER_PATH)
-    knn.evaluate(EVAL_PATH, SAVE_PATH_EVAL)
+    knn.evaluate(EVAL_PATH, SAVE_PATH_EVAL, verbose=False)
 
     

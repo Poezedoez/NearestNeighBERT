@@ -134,8 +134,7 @@ def prepare_dataset(path, tokenizer, neg_label='O', f_reduce="abs_max"):
         neg_tokens = _create_negative_tokens(string_tokens, pos_tokens, neg_label)
         tokens = pos_tokens + neg_tokens
         for token in tokens: token.calculate_embedding(embeddings, bert_tokens, orig2tok, f_reduce)
-        for token in tokens:
-            print(token)
+        
         yield tokens
 
 
