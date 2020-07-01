@@ -1,6 +1,6 @@
 import json
 import faiss
-import nearest_neighbert.utils
+import nearest_neighbert.utils as nn_utils
 import random
 import torch
 import os
@@ -125,7 +125,7 @@ def prepare_dataset(path, tokenizer, neg_label='O', f_reduce="abs_max"):
     dataset = json.load(open(path))
     for annotation in tqdm(dataset):
         # Get embeddings and token mappings
-        string_tokens = adjust_annotation(annotation, tokenizer)   
+        string_tokens = annotation["tokens"]   
         bert_tokens, tok2orig, orig2tok = tokenizer.tokenize_with_mapping(string_tokens, "bert")
         embeddings = tokenizer.embed(bert_tokens)[1:-1] # skip special tokens 
 
@@ -138,40 +138,29 @@ def prepare_dataset(path, tokenizer, neg_label='O', f_reduce="abs_max"):
         yield tokens
 
 
-def adjust_annotation(annotation: Dict, tokenizer):
-    input_tokens = annotation["tokens"]
-    tokens, _, input2split = tokenizer.tokenize_with_mapping(input_tokens, f_tokenize="split")
-    for entity in annotation["entities"]:
-        positions = input2split[entity["start"]:entity["end"]]
-        new_start, new_end = positions[0][0], positions[-1][1]
-        entity["start"], entity["end"] = new_start, new_end
+def init_faiss(f_reduce: str, f_similarity: str, size: int):
+    def _l2(d):
+        return faiss.IndexFlatL2(d)
+    def _ip(d):
+        return faiss.IndexFlatIP(d)
 
-    return tokens
-
-
-def init_faiss(f_reduce: str, f_similarity: str, tokenizer):
-    def _l2(size):
-        return faiss.IndexFlatL2(size)
-    def _ip(size):
-        return faiss.IndexFlatIP(size)
-
-    embedding_size = {
-        "concat": tokenizer.embedding_size*2,
-        "substract": tokenizer.embedding_size,
-        "mean": tokenizer.embedding_size 
-    }.get(f_reduce, tokenizer.embedding_size)
+    d = {
+        "concat": size*2,
+        "substract": size,
+        "mean": size 
+    }.get(f_reduce, size)
 
     index = {
         "L2": _l2,
         "IP": _ip
     }.get(f_similarity, _l2)
 
-    return index(embedding_size)
+    return index(d)
 
 
 def save_faiss(index, table, name, save_path="data/save/"):
     print("Saving {} index...".format(name))
-    utils.create_dir(save_path)
+    nn_utils.create_dir(save_path)
     index_path = os.path.join(save_path, "{}_index".format(name))
     faiss.write_index(index, index_path)
     table_path = os.path.join(save_path, "{}_table.json".format(name))

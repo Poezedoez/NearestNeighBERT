@@ -3,7 +3,6 @@ import numpy as np
 import json
 import argparse
 from typing import List, Tuple, Dict
-from nearest_neighbert.data import adjust_annotation
 import sys
 
 # From spert.evaluator class
@@ -123,8 +122,6 @@ def evaluate(gt_path, pred_path, tokenizer):
     pred_tokens = []
 
     for gt_sequence, pred_sequence in zip(gt_dataset, pred_dataset):
-        adjust_annotation(gt_sequence, tokenizer)
-        adjust_annotation(pred_sequence, tokenizer)
         gt_spans.append(_convert_span_tuples(gt_sequence))
         pred_spans.append(_convert_span_tuples(pred_sequence))
         gt_tokens.append(_convert_token_tuples(gt_sequence))
