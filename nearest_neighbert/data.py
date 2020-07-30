@@ -52,11 +52,11 @@ class Datapoint(ABC):
 
 class Token(Datapoint):
     def __init__(self, index: int, label='O', token=str, 
-                 sentence_id='', embedding=None, embedding_tokens=[]):
+                 sentence_id='', embedding=None, embedding_tokens=None):
         super().__init__(embedding, label)
         self.index = index
         self.token = token
-        self.embedding_tokens = embedding_tokens
+        self.embedding_tokens = embedding_tokens if embedding_tokens else []
         self.sentence_id = sentence_id
         self.id = self.create_id(token, index)
 
@@ -104,13 +104,18 @@ class Token(Datapoint):
         def _mean(embeddings, bert_tokens, orig2tok):
             first, last = orig2tok[self.index]
             selected_embeddings = [embedding for embedding in embeddings[first:last]]
+            if not selected_embeddings:
+                print(bert_tokens)
             embedding = torch.stack(selected_embeddings).mean(dim=0)
             tokens = bert_tokens[first:last]
 
             return embedding, tokens
 
         f_reduce = {"first": _first, "abs_max": _abs_max, "mean": _mean}.get(accumulation_f, _mean)
-        self.embedding, self.embedding_tokens = f_reduce(embeddings, bert_tokens, orig2tok)
+        try:
+            self.embedding, self.embedding_tokens = f_reduce(embeddings, bert_tokens, orig2tok)
+        except:
+            print("exception occurred in calculating embeddings for token in \n {}".format(bert_tokens))
 
         return self.embedding
 
@@ -133,7 +138,12 @@ def prepare_dataset(path, tokenizer, neg_label='O', f_reduce="abs_max"):
         pos_tokens = _create_positive_tokens(string_tokens, annotation["entities"])
         neg_tokens = _create_negative_tokens(string_tokens, pos_tokens, neg_label)
         tokens = pos_tokens + neg_tokens
-        for token in tokens: token.calculate_embedding(embeddings, bert_tokens, orig2tok, f_reduce)
+        if tokens:
+            for token in tokens: 
+                try:
+                    token.calculate_embedding(embeddings, bert_tokens, orig2tok, f_reduce)
+                except:
+                    print("exception occurred in calculating embeddings for token {} in \n {}".format(token, tokens))
 
         yield tokens
 
@@ -153,7 +163,7 @@ def init_faiss(f_reduce: str, f_similarity: str, size: int):
     index = {
         "L2": _l2,
         "IP": _ip
-    }.get(f_similarity, _l2)
+    }.get(f_similarity)
 
     return index(d)
 

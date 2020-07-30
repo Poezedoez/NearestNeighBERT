@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-import nearest_neighbert.utils
+import nearest_neighbert.utils as nn_utils
 import os, string
 import torch
 from transformers import BertModel, BertTokenizer
@@ -21,7 +21,7 @@ class Embedder(ABC):
         word_to_char_offset = []
         new_token = True
         for i, c in enumerate(text):
-            if utils.is_whitespace(c):
+            if nn_utils.is_whitespace(c):
                 new_token = True
             else:
                 if c in string.punctuation:
@@ -100,6 +100,8 @@ class BertEmbedder(Embedder):
         for (i, token) in enumerate(doc_tokens):
             sub_tokens = f.get(f_tokenize, self.tokenizer.tokenize)(token)
             start_end = (len(all_doc_tokens), len(all_doc_tokens)+len(sub_tokens))
+            if start_end[0]==start_end[1]: # exceptional case
+                start_end = (start_end[0], start_end[0]+1)
             orig_to_tok_index.append(start_end)
             for sub_token in sub_tokens:
                 tok_to_orig_index.append(i)

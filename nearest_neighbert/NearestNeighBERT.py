@@ -13,13 +13,11 @@ import copy
 from typing import List, Type
 
 # Local
-# sys.path.append('.')
-# NN = __import__(__name__.split('.')[0])
-import nearest_neighbert.data
+import nearest_neighbert.data as nn_data
 from nearest_neighbert.embedders import BertEmbedder
 from nearest_neighbert.evaluate import compare_datasets
 from nearest_neighbert.evaluate import evaluate as eval
-import nearest_neighbert.utils
+import nearest_neighbert.utils as nn_utils
 
 
 
@@ -43,24 +41,28 @@ class NearestNeighBERT:
     '''
 
     def __init__(self, k=10, f_voting="similarity_weighted", f_similarity="L2", index=None, 
-                 table=[], tokenizer=None, f_reduce="mean", neg_label="O"):
+                 table=None, tokenizer=None, f_reduce="mean", neg_label="O", indicator="knn_module",
+                 device=DEVICE):
         self.k = k
         self.f_voting = f_voting
         self.f_similarity = f_similarity
         self.index = index
-        self.table = table
+        self.table = table = [] if not table else table
         self.tokenizer = tokenizer
         self.f_reduce = f_reduce
         self.neg_label = neg_label
+        self.indicator = indicator
         self.config = None
+        self.device = device
+        self.index_count = 0
 
 
     def configure(self, path="configs/config_za.json"):
         with open(path, 'r', encoding='utf-8') as json_config:
             config = json.load(json_config)
             self.k = config.get("k", self.k)
-            self.f_voting = config.get("voting_f", self.f_voting)
-            self.f_similarity = config.get("similarity_f", self.f_similarity)
+            self.f_voting = config.get("f_voting", self.f_voting)
+            self.f_similarity = config.get("f_similarity", self.f_similarity)
             self.f_reduce = config.get("f_reduce", self.f_reduce)
             self.neg_label = config.get("neg_label", self.neg_label)
         self.config = config
@@ -68,14 +70,18 @@ class NearestNeighBERT:
         return self
 
 
-    def ready_training(self, tokenizer_path):
+    def ready_training(self, tokenizer_path, size=None):
         self.tokenizer = BertEmbedder(tokenizer_path)
-        self.index = data.init_faiss(self.f_reduce, self.f_similarity, self.tokenizer)
+        embedding_size = size if size else self.tokenizer.embedding_size
+        self.index = nn_data.init_faiss(self.f_reduce, self.f_similarity, embedding_size)
 
 
     def train(self, dataset_path, tokenizer_path='scibert-base-cased', save_path="data/", save=True):   
+        """
+        Add whole dataset (not yet embedded) to memory 
+        """
         self.ready_training(tokenizer_path)
-        data_generator = data.prepare_dataset(dataset_path, self.tokenizer, self.neg_label, self.f_reduce)
+        data_generator = nn_data.prepare_dataset(dataset_path, self.tokenizer, self.neg_label, self.f_reduce)
         print("Training...")
         for tokens in data_generator:
             if tokens:
@@ -83,45 +89,44 @@ class NearestNeighBERT:
                 token_embeddings = torch.stack(token_embeddings).numpy()
                 token_entries = [t.to_table_entry() for t in tokens]
                 self.train_(token_embeddings, token_entries)
+                self.index_count += len(token_embeddings)
 
         if save:
-            data.save_faiss(self.index, self.table, "tokens", save_path)
+            nn_data.save_faiss(self.index, self.table, "tokens", save_path)
             train_config_path = os.path.join(save_path, "train_config.json")
             self.save_config(train_config_path)
     
 
     def train_(self, embeddings, entries):
         """
-        This function can be used to train incremently, assumes already processed embeddings
-        and corresponding entries with info about them such as label.
+        Add embeddings and corresponding entries to memory.
         """  
         self.table += entries
-        self.index.add(np.array(embeddings))
+        a = np.array(embeddings, dtype=np.float32)
+        self.index.add(a)
+        self.index_count += len(np.array(embeddings))
 
 
-    def ready_inference(self, index_path, tokenizer_path='scibert-base-uncased', device=DEVICE):
+    def ready_inference(self, index_path, tokenizer_path='scibert-base-uncased'):
         self.tokenizer = BertEmbedder(tokenizer_path)
-        self.index, self.table = data.load_faiss(index_path, device, "tokens")
+        self.index, self.table = nn_data.load_faiss(index_path, self.device, "tokens")
 
 
     def infer(self, document, verbose=False):
+        """
+        Do inference on whole document/dataset (not yet embedded)
+        """
+        print("Using {} as similarity index".format(self.f_similarity))
         inference_document = []
         for sentence in tqdm(document["sentences"]):
             string_tokens, _, token2char, = self.tokenizer.split(sentence)
             bert_tokens, tok2orig, orig2tok = self.tokenizer.tokenize_with_mapping(string_tokens)
             embeddings = self.tokenizer.embed(bert_tokens)[1:-1] # skip special tokens
-
-            tokens = data.create_tokens(string_tokens)
+            tokens = nn_data.create_tokens(string_tokens)
             if tokens:
                 token_embeddings = [t.calculate_embedding(embeddings, bert_tokens, orig2tok, self.f_reduce) for t in tokens]
                 q = torch.stack(token_embeddings).numpy()
-                D, I = self.index.search(q, self.k)
-                a = D-np.min(D)
-                b = np.max(D)-np.min(D)
-                D_norm = np.divide(a, b, out=np.zeros_like(a), where=b!=0)
-                if self.f_similarity=='L2':
-                    D_norm = 1-D_norm # 1-distance for similarity
-                labels, neighbors = self.vote(D_norm, I)
+                labels, neighbors = self.infer_(q)
                 self.assign_labels(tokens, labels, neighbors, verbose)
 
             prediction = self.convert_prediction(string_tokens, tokens)
@@ -130,26 +135,30 @@ class NearestNeighBERT:
         return inference_document
 
 
-    def infer_(self, embeddings, label_type=str):
+    def infer_(self, embeddings, label_type=str, label_key="label"):
         """
-        This function alternative assumes already calculated embeddings
-        and returns voted labels based on training index labels
+        Do one inference call on a query.
         """
-        q = np.array(embeddings)
+        q = np.array(embeddings, dtype=np.float32)
         D, I = self.index.search(q, self.k)
-        labels, neighbors = self.vote(D, I, label_type)
+        a = D-np.min(D, axis=1)[:, np.newaxis]
+        b = np.max(D, axis=1)[:, np.newaxis]-np.min(D, axis=1)[:, np.newaxis]
+        D_norm = np.divide(a, b, out=np.zeros_like(a), where=b!=0)
+        if self.f_similarity=='L2':
+            D_norm = 1-D_norm # 1-distance for similarity
+        labels, neighbors = self.vote(D_norm, I, label_type, label_key)
 
         return labels, neighbors
 
 
     def evaluate(self, evaluation_path, results_path="data/results/", verbose=True):
         """
-        Evaluate a dataset by doing inference on the data without labels. 
+        Evaluate a dataset obtained by doing inference on the data without labels. 
         See data.py for example format of the dataset.
         """
         dataset = json.load(open(evaluation_path))
         sentences = [' '.join(entry["tokens"]) for entry in dataset]
-        utils.create_dir(results_path)
+        nn_utils.create_dir(results_path)
 
         print("Evaluating...")
         predictions = self.infer({"sentences": sentences}, verbose=verbose)
@@ -167,20 +176,21 @@ class NearestNeighBERT:
         return ner_eval, rel_eval
 
 
-    def vote(self, similarities, indices, label_type=str):
+    def vote(self, similarities, indices, label_type=str, label_key="label"):
         """
         Given an array of similairties and neighbor indices,
         vote labels for each entry
         """
         pred_labels = []
         all_neighbors = []
+
         for i, row in enumerate(indices):
             weight_counter = Counter()
             nearest_neighbors = []
             for j, neighbor_index in enumerate(row):
                 neighbor = self.table[neighbor_index]
                 nearest_neighbors.append(neighbor)
-                vote = neighbor["label"]
+                vote = neighbor[label_key]
                 weight = VOTING_F[self.f_voting](similarities[i][j], j)
                 weight_counter[vote] += weight
             pred_label = weight_counter.most_common(1)[0][0]
@@ -195,12 +205,16 @@ class NearestNeighBERT:
             t.label = l
             if verbose:
                 print("Predicted: ", t)
-                for i, neighbor in enumerate(n):
+                for i in range(min(len(n), 5)):
+                    neighbor = n[i]
                     print("\t (nn {}) {}".format(i, neighbor["string"]))
                 print()
 
 
     def _expand_entities(self, string_tokens, tokens):
+        '''
+        Greedy span selection heuristic
+        '''
         def _is_entity(label): 
             return label!=self.neg_label
         def _span_continues(prev, current):
@@ -254,20 +268,40 @@ class NearestNeighBERT:
         return "NearestNeighBERT"    
 
 if __name__ == "__main__":
-    # TRAIN_PATH = "../spert/data/datasets/semeval2017_task10/semeval2017_task10_train.json"
-    # SAVE_PATH_TRAIN = "data/save/semeval2017/train/"
-    # EVAL_PATH = "../spert/data/datasets/semeval2017_task10/semeval2017_task10_dev.json"
-    # SAVE_PATH_EVAL = "data/save/semeval2017/eval/"
-    # CONFIG_PATH = "configs/semeval.json"
+    TRAIN_PATH = "data/datasets/semeval2017/semeval2017_task10_train.json"
+    SAVE_PATH_TRAIN = "data/save/semeval2017/train/"
+    EVAL_PATH = "data/datasets/semeval2017/semeval2017_task10_test.json"
+    SAVE_PATH_EVAL = "data/save/semeval2017/eval/"
+    CONFIG_PATH = "configs/semeval.json"
+    TOKENIZER_PATH = "scibert_scivocab_uncased/"
+
+    # TRAIN_PATH = "data/datasets/scierc/scierc_train.json"
+    # SAVE_PATH_TRAIN = "data/save/scierc/train/"
+    # EVAL_PATH = "data/datasets/scierc/scierc_test.json"
+    # SAVE_PATH_EVAL = "data/save/scierc/eval/"
+    # CONFIG_PATH = "configs/scierc.json"
     # TOKENIZER_PATH = "scibert_scivocab_uncased/"
 
-    TRAIN_PATH = "data/datasets/conll03/conll03_train.json"
-    SAVE_PATH_TRAIN = "data/save/conll03/train/"
-    EVAL_PATH = "data/datasets/conll03/conll03_dev.json"
-    SAVE_PATH_EVAL = "data/save/conll03/eval/"
-    CONFIG_PATH = "configs/conll03.json"
-    TOKENIZER_PATH = "bert-base-uncased"
+    # TRAIN_PATH = "data/datasets/conll03/conll03_train.json"
+    # SAVE_PATH_TRAIN = "data/save/conll03/train/"
+    # EVAL_PATH = "data/datasets/conll03/conll03_test.json"
+    # SAVE_PATH_EVAL = "data/save/conll03/eval/"
+    # CONFIG_PATH = "configs/conll03.json"
+    # TOKENIZER_PATH = "bert-base-uncased"
 
+    # TRAIN_PATH = "data/datasets/za/v2/train/combined_labeling/dataset.json"
+    # SAVE_PATH_TRAIN = "data/save/za/train/"
+    # EVAL_PATH = "data/datasets/za/v5/test/string_labeling/dataset.json"
+    # SAVE_PATH_EVAL = "data/save/za/eval/"
+    # CONFIG_PATH = "configs/za.json"
+    # TOKENIZER_PATH = "scibert_scivocab_uncased/"
+
+    # TRAIN_PATH = "data/datasets/conll03/conll03_train.json"
+    # SAVE_PATH_TRAIN = "data/save/conll03/train/"
+    # EVAL_PATH = "data/datasets/conll03/conll03_minitrain.json"
+    # SAVE_PATH_EVAL = "data/save/conll03/eval/"
+    # CONFIG_PATH = "configs/conll03.json"
+    # TOKENIZER_PATH = "bert-base-uncased"
     
     knn = NearestNeighBERT().configure(CONFIG_PATH)
     # knn.train(TRAIN_PATH, TOKENIZER_PATH, SAVE_PATH_TRAIN)
