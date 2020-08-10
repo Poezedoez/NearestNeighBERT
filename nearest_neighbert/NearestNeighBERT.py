@@ -43,7 +43,7 @@ class NearestNeighBERT:
 
     def __init__(self, k=10, f_voting="similarity_weighted", f_similarity="L2", index=None, 
                  table=None, tokenizer=None, f_reduce="mean", neg_label="O", indicator="knn_module",
-                 device=DEVICE, positive_multiplier=1):
+                 device=DEVICE, positive_multiplier=1, faiss_gpu=False):
         self.k = k
         self.f_voting = f_voting
         self.f_similarity = f_similarity
@@ -68,6 +68,8 @@ class NearestNeighBERT:
             self.f_reduce = config.get("f_reduce", self.f_reduce)
             self.neg_label = config.get("neg_label", self.neg_label)
             self.positive_multiplier = config.get("positive_multiplier", self.positive_multiplier)
+            self.device = config.get("device", self.device)
+            self.faiss_gpu = config.get("faiss_gpu", self.faiss_gpu)
         self.config = config
 
         return self
@@ -112,7 +114,7 @@ class NearestNeighBERT:
 
     def ready_inference(self, index_path, tokenizer_path='scibert-base-uncased'):
         self.tokenizer = BertEmbedder(tokenizer_path)
-        self.index, self.table = nn_data.load_faiss(index_path, self.device, "tokens")
+        self.index, self.table = nn_data.load_faiss(index_path, self.faiss_gpu, "tokens")
 
 
     def infer(self, document: List[List[str]], verbosity):

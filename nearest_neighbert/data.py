@@ -180,10 +180,10 @@ def save_faiss(index, table, name, save_path="data/save/"):
     print("Indexed {} {} with their labels".format(len(table), name))
 
 
-def load_faiss(path, device, name):
+def load_faiss(path, gpu, name):
     index_path = os.path.join(path, "{}_index".format(name))
     index = faiss.read_index(index_path)
-    if device == "cuda":
+    if gpu:
         res = faiss.StandardGpuResources()
         index = faiss.index_cpu_to_gpu(res, 0, index)
     
