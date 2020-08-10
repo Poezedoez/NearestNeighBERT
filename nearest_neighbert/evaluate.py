@@ -109,7 +109,7 @@ def _convert_token_tuples(sequence):
         
     return token_tuples
 
-def evaluate(gt_path, pred_path, tokenizer):
+def evaluate(gt_path, pred_path, tokenizer, print_results=True):
     with open(gt_path, 'r', encoding='utf-8') as f:
         gt_dataset = json.load(f)
 
@@ -131,10 +131,10 @@ def evaluate(gt_path, pred_path, tokenizer):
     print("")
     print("--- Entities (named entity recognition (NER)) ---")
     print("An entity span is considered correct if the entity type and span start/end is predicted correctly")
-    ner_span_eval = _score(gt_spans, pred_spans, print_results=True)[:3]
+    ner_span_eval = _score(gt_spans, pred_spans, print_results=print_results)[:3]
     print("")
     print("An entity token is considered correct if the entity type is predicted correctly")
-    ner_token_eval = _score(gt_tokens, pred_tokens, print_results=True)[:3]
+    ner_token_eval = _score(gt_tokens, pred_tokens, print_results=print_results)[:3]
     print("")
 
     return ner_span_eval, ner_token_eval

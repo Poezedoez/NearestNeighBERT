@@ -77,7 +77,7 @@ class Token(Datapoint):
         return entry
 
 
-    def calculate_embedding(self, embeddings, bert_tokens, orig2tok, accumulation_f="abs_max"):
+    def calculate_embedding(self, embeddings, bert_tokens, orig2tok, accumulation_f="mean"):
         """
         Here it can be decided which embedding is selected
         to represent all (sub)tokens in the token. Several strategies can be applied.
@@ -116,6 +116,7 @@ class Token(Datapoint):
             self.embedding, self.embedding_tokens = f_reduce(embeddings, bert_tokens, orig2tok)
         except:
             print("exception occurred in calculating embeddings for token in \n {}".format(bert_tokens))
+            return torch.zeros(768)
 
         return self.embedding
 

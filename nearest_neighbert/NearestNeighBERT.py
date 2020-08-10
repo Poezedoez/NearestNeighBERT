@@ -11,6 +11,7 @@ import time
 import faiss
 import copy
 from typing import List, Type
+import random
 
 # Local
 import nearest_neighbert.data as nn_data
@@ -42,7 +43,7 @@ class NearestNeighBERT:
 
     def __init__(self, k=10, f_voting="similarity_weighted", f_similarity="L2", index=None, 
                  table=None, tokenizer=None, f_reduce="mean", neg_label="O", indicator="knn_module",
-                 device=DEVICE):
+                 device=DEVICE, positive_multiplier=1):
         self.k = k
         self.f_voting = f_voting
         self.f_similarity = f_similarity
@@ -55,6 +56,7 @@ class NearestNeighBERT:
         self.config = None
         self.device = device
         self.index_count = 0
+        self.positive_multiplier = positive_multiplier
 
 
     def configure(self, path="configs/config_za.json"):
@@ -65,6 +67,7 @@ class NearestNeighBERT:
             self.f_similarity = config.get("f_similarity", self.f_similarity)
             self.f_reduce = config.get("f_reduce", self.f_reduce)
             self.neg_label = config.get("neg_label", self.neg_label)
+            self.positive_multiplier = config.get("positive_multiplier", self.positive_multiplier)
         self.config = config
 
         return self
@@ -112,24 +115,23 @@ class NearestNeighBERT:
         self.index, self.table = nn_data.load_faiss(index_path, self.device, "tokens")
 
 
-    def infer(self, document, verbose=False):
+    def infer(self, document: List[List[str]], verbosity):
         """
         Do inference on whole document/dataset (not yet embedded)
         """
         print("Using {} as similarity index".format(self.f_similarity))
         inference_document = []
         for sentence in tqdm(document["sentences"]):
-            string_tokens, _, token2char, = self.tokenizer.split(sentence)
-            bert_tokens, tok2orig, orig2tok = self.tokenizer.tokenize_with_mapping(string_tokens)
+            bert_tokens, tok2orig, orig2tok = self.tokenizer.tokenize_with_mapping(sentence)
             embeddings = self.tokenizer.embed(bert_tokens)[1:-1] # skip special tokens
-            tokens = nn_data.create_tokens(string_tokens)
+            tokens = nn_data.create_tokens(sentence)
             if tokens:
                 token_embeddings = [t.calculate_embedding(embeddings, bert_tokens, orig2tok, self.f_reduce) for t in tokens]
                 q = torch.stack(token_embeddings).numpy()
                 labels, neighbors = self.infer_(q)
-                self.assign_labels(tokens, labels, neighbors, verbose)
+                self.assign_labels(tokens, labels, neighbors, verbosity)
 
-            prediction = self.convert_prediction(string_tokens, tokens)
+            prediction = self.convert_prediction(sentence, tokens)
             inference_document.append(prediction)
 
         return inference_document
@@ -138,6 +140,7 @@ class NearestNeighBERT:
     def infer_(self, embeddings, label_type=str, label_key="label"):
         """
         Do one inference call on a query.
+        @embeddings are type array_like.
         """
         q = np.array(embeddings, dtype=np.float32)
         D, I = self.index.search(q, self.k)
@@ -151,29 +154,32 @@ class NearestNeighBERT:
         return labels, neighbors
 
 
-    def evaluate(self, evaluation_path, results_path="data/results/", verbose=True):
+    def evaluate(self, evaluation_path, results_path="data/results/", verbosity=0):
         """
         Evaluate a dataset obtained by doing inference on the data without labels. 
         See data.py for example format of the dataset.
         """
         dataset = json.load(open(evaluation_path))
-        sentences = [' '.join(entry["tokens"]) for entry in dataset]
+        sentences = [entry["tokens"] for entry in dataset]
         nn_utils.create_dir(results_path)
 
         print("Evaluating...")
-        predictions = self.infer({"sentences": sentences}, verbose=verbose)
+        predictions = self.infer({"sentences": sentences[:666]}, verbosity=verbosity)
         predictions_path = os.path.join(results_path, "predictions.json")
         with open(predictions_path, 'w', encoding='utf-8') as f:
             json.dump(predictions, f)
-        ner_eval, rel_eval = eval(evaluation_path, predictions_path, self.tokenizer)
+        span_eval, token_eval = eval(evaluation_path, predictions_path, self.tokenizer, print_results=verbosity)
+        if not verbosity:
+            print("P/R/F1 (span):", span_eval)
+            print("P/R/F1 (token):", token_eval)
 
         predicted_examples_path = os.path.join(results_path, "predicted_examples.txt")
-        compare_datasets(evaluation_path, predictions_path, predicted_examples_path)
+        # compare_datasets(evaluation_path, predictions_path, predicted_examples_path)
 
         final_config_path = os.path.join(results_path, "final_config.json")
         self.save_config(final_config_path)
 
-        return ner_eval, rel_eval
+        return span_eval, token_eval
 
 
     def vote(self, similarities, indices, label_type=str, label_key="label"):
@@ -192,7 +198,13 @@ class NearestNeighBERT:
                 nearest_neighbors.append(neighbor)
                 vote = neighbor[label_key]
                 weight = VOTING_F[self.f_voting](similarities[i][j], j)
+                if vote != self.neg_label:
+                    weight = weight * self.positive_multiplier
                 weight_counter[vote] += weight
+            # print(">>> {} <<<".format(nearest_neighbors[0]["token"]))
+            # for l, c in weight_counter.items():
+            #     print(l, c)
+            # print()
             pred_label = weight_counter.most_common(1)[0][0]
             pred_labels.append(label_type(pred_label))
             all_neighbors.append(nearest_neighbors)
@@ -200,10 +212,10 @@ class NearestNeighBERT:
         return pred_labels, all_neighbors
 
 
-    def assign_labels(self, tokens, labels, neighbors, verbose=False):
+    def assign_labels(self, tokens, labels, neighbors, verbosity=0):
         for t, l, n in zip(tokens, labels, neighbors):
             t.label = l
-            if verbose:
+            if random.uniform(0, 1) < verbosity:
                 print("Predicted: ", t)
                 for i in range(min(len(n), 5)):
                     neighbor = n[i]
@@ -268,18 +280,11 @@ class NearestNeighBERT:
         return "NearestNeighBERT"    
 
 if __name__ == "__main__":
-    TRAIN_PATH = "data/datasets/semeval2017/semeval2017_task10_train.json"
-    SAVE_PATH_TRAIN = "data/save/semeval2017/train/"
-    EVAL_PATH = "data/datasets/semeval2017/semeval2017_task10_test.json"
-    SAVE_PATH_EVAL = "data/save/semeval2017/eval/"
-    CONFIG_PATH = "configs/semeval.json"
-    TOKENIZER_PATH = "scibert_scivocab_uncased/"
-
-    # TRAIN_PATH = "data/datasets/scierc/scierc_train.json"
-    # SAVE_PATH_TRAIN = "data/save/scierc/train/"
-    # EVAL_PATH = "data/datasets/scierc/scierc_test.json"
-    # SAVE_PATH_EVAL = "data/save/scierc/eval/"
-    # CONFIG_PATH = "configs/scierc.json"
+    # TRAIN_PATH = "data/datasets/semeval2017/semeval2017_task10_train.json"
+    # SAVE_PATH_TRAIN = "data/save/semeval2017/train/"
+    # EVAL_PATH = "data/datasets/semeval2017/semeval2017_task10_test.json"
+    # SAVE_PATH_EVAL = "data/save/semeval2017/eval/"
+    # CONFIG_PATH = "configs/semeval.json"
     # TOKENIZER_PATH = "scibert_scivocab_uncased/"
 
     # TRAIN_PATH = "data/datasets/conll03/conll03_train.json"
@@ -289,23 +294,25 @@ if __name__ == "__main__":
     # CONFIG_PATH = "configs/conll03.json"
     # TOKENIZER_PATH = "bert-base-uncased"
 
-    # TRAIN_PATH = "data/datasets/za/v2/train/combined_labeling/dataset.json"
-    # SAVE_PATH_TRAIN = "data/save/za/train/"
-    # EVAL_PATH = "data/datasets/za/v5/test/string_labeling/dataset.json"
-    # SAVE_PATH_EVAL = "data/save/za/eval/"
+    for version in [1,2,3]:
+        for fraction in [0.25, 0.5, 0.75]:
+            TRAIN_PATH = "../speer/data/datasets/za{}/za_train_{}.json".format(version, fraction)
+            SAVE_PATH_TRAIN = "data/save/za{}/train/{}/".format(version, fraction)
+            EVAL_PATH = "../speer/data/datasets/za{}/za_test.json".format(version)
+            SAVE_PATH_EVAL = "data/save/za{}/eval/{}/".format(version, fraction)
+            CONFIG_PATH = "configs/za.json"
+            TOKENIZER_PATH = "scibert_scivocab_uncased/"
+
+
+
+    # TRAIN_PATH = "../speer/data/datasets/za{}_string/za_train_{}.json".format(za_version, frac)
+    # SAVE_PATH_TRAIN = "data/save/za{}_string/train/{}/".format(za_version, frac)
+    # EVAL_PATH = "../speer/data/datasets/za{}_string/GOLD.json".format(za_version)
+    # SAVE_PATH_EVAL = "data/save/za{}_string/eval/{}/".format(za_version, frac)
     # CONFIG_PATH = "configs/za.json"
     # TOKENIZER_PATH = "scibert_scivocab_uncased/"
 
-    # TRAIN_PATH = "data/datasets/conll03/conll03_train.json"
-    # SAVE_PATH_TRAIN = "data/save/conll03/train/"
-    # EVAL_PATH = "data/datasets/conll03/conll03_minitrain.json"
-    # SAVE_PATH_EVAL = "data/save/conll03/eval/"
-    # CONFIG_PATH = "configs/conll03.json"
-    # TOKENIZER_PATH = "bert-base-uncased"
     
-    knn = NearestNeighBERT().configure(CONFIG_PATH)
-    # knn.train(TRAIN_PATH, TOKENIZER_PATH, SAVE_PATH_TRAIN)
-    knn.ready_inference(SAVE_PATH_TRAIN, TOKENIZER_PATH)
-    knn.evaluate(EVAL_PATH, SAVE_PATH_EVAL, verbose=False)
+
 
     
