@@ -164,7 +164,7 @@ class NearestNeighBERT:
         nn_utils.create_dir(results_path)
 
         print("Evaluating...")
-        predictions = self.infer({"sentences": sentences[:666]}, verbosity=verbosity)
+        predictions = self.infer({"sentences": sentences}, verbosity=verbosity)
         predictions_path = os.path.join(results_path, "predictions.json")
         with open(predictions_path, 'w', encoding='utf-8') as f:
             json.dump(predictions, f)
@@ -174,7 +174,7 @@ class NearestNeighBERT:
             print("P/R/F1 (token):", token_eval)
 
         predicted_examples_path = os.path.join(results_path, "predicted_examples.txt")
-        # compare_datasets(evaluation_path, predictions_path, predicted_examples_path)
+        compare_datasets(evaluation_path, predictions_path, predicted_examples_path)
 
         final_config_path = os.path.join(results_path, "final_config.json")
         self.save_config(final_config_path)
