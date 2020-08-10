@@ -296,12 +296,17 @@ if __name__ == "__main__":
 
     for version in [1,2,3]:
         for fraction in [0.25, 0.5, 0.75]:
+            print("V", version, "F", fraction)
             TRAIN_PATH = "../speer/data/datasets/za{}/za_train_{}.json".format(version, fraction)
             SAVE_PATH_TRAIN = "data/save/za{}/train/{}/".format(version, fraction)
             EVAL_PATH = "../speer/data/datasets/za{}/za_test.json".format(version)
             SAVE_PATH_EVAL = "data/save/za{}/eval/{}/".format(version, fraction)
             CONFIG_PATH = "configs/za.json"
             TOKENIZER_PATH = "scibert_scivocab_uncased/"
+            knn = NearestNeighBERT().configure(CONFIG_PATH)
+            knn.train(TRAIN_PATH, TOKENIZER_PATH, SAVE_PATH_TRAIN)
+            knn.ready_inference(SAVE_PATH_TRAIN, TOKENIZER_PATH)
+            span_eval, token_eval = knn.evaluate(EVAL_PATH, SAVE_PATH_EVAL, verbosity=0)
 
 
 
