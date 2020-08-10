@@ -297,9 +297,9 @@ if __name__ == "__main__":
     for version in [1,2,3]:
         for fraction in [0.25, 0.5, 0.75]:
             print("V", version, "F", fraction)
-            TRAIN_PATH = "../speer/data/datasets/za{}/za_train_{}.json".format(version, fraction)
+            TRAIN_PATH = "data/datasets/za{}/za_train_{}.json".format(version, fraction)
             SAVE_PATH_TRAIN = "data/save/za{}/train/{}/".format(version, fraction)
-            EVAL_PATH = "../speer/data/datasets/za{}/za_test.json".format(version)
+            EVAL_PATH = "data/datasets/za{}/za_test.json".format(version)
             SAVE_PATH_EVAL = "data/save/za{}/eval/{}/".format(version, fraction)
             CONFIG_PATH = "configs/za.json"
             TOKENIZER_PATH = "scibert_scivocab_uncased/"
