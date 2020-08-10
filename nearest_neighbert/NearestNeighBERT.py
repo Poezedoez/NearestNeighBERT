@@ -57,6 +57,7 @@ class NearestNeighBERT:
         self.device = device
         self.index_count = 0
         self.positive_multiplier = positive_multiplier
+        self.faiss_gpu = faiss_gpu
 
 
     def configure(self, path="configs/config_za.json"):
