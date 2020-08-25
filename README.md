@@ -1,8 +1,8 @@
-# NearestNeighBERT-Faiss
+# NearestNeighBERT
 
 ### Installing 
 ```
-git clone https://github.com/Poezedoez/NearestNeighBERT-Faiss.git
-cd NearestNeighBERT-Faiss
+git clone https://github.com/Poezedoez/NearestNeighBERT.git
+cd NearestNeighBERT
 pip install .
 ```
