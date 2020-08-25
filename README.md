@@ -1,8 +1,7 @@
 # NearestNeighBERT
 
 ### Installing 
+Download and unpack the zip. In the working directory, install the module using:
 ```
-git clone https://github.com/Poezedoez/NearestNeighBERT.git
-cd NearestNeighBERT
 pip install .
 ```
